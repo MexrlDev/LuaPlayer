@@ -124,52 +124,41 @@ jobs:
 
           cp -v src/liblua.a "$PS2SDK/ports/lib/"
           cp -v src/liblua.a "$PS2SDK/ports/lib/liblualib.a"
-          cp -v src/lua.h src print/luaconf.h src/l(fualib.h src/lauxlib.h" \
-                "$PS2SDK/portsPat/include/"
+          cp -v src/lua.h src/luaconf.h src/lualib.h src/lauxlib.h \
+                "$PS2SDK/ports/include/"
 
-          echo "===ched verify installation ==="
-          grep { -E 'LUA_VERSION|LpathUA_RELEASE' "$PS2SDK/}ports/include/lua.h"
-          ls -la "$PS2SDK/ports/lib/"liblua*.a ({
+          echo "=== verify installation ==="
+          grep -E 'LUA_VERSION|LUA_RELEASE' "$PS2SDK/ports/include/lua.h"
+          ls -la "$PS2SDK/ports/lib/"liblua*.a
 
-      - name: Patch libtimen.h to avoid struct timeval re}definition
+      - name: Patch libtime.h to avoid struct timeval redefinition
         run: |
-          set replacement -e
-          FILE=src/)")
-ps2sdk/libtime.h         
+          set -e
+          FILE=src/ps2sdk/libtime.h
           cp "$FILE" "$FILE.orig"
-          python3 - <<'PYEOF'
-          import re, sys
-          path = "src/ps2sdk/libtime.h"
-          src = open(path).read()
-          pattern = r'struct\s+timeval\s*\{[^}]*\}\s*;'
-          def repl(m):
-              return (
-                  '#if !defined(_SYS__TIMEVAL_H_) && !defined(_TIMEVAL_DEFINED) '
-                  '&& !defined(_STRUCT_TIMEVAL_DEFINED)\n'
-                  + m.group(0) + '\n'
-                  + '#define _STRUCT_TIMEVAL_DEFINED 1\n'
-                  + '#endif'
-              )
-          new, n = re.subn(pattern, repl, src, count=1, flags=re.DOTALL)
-          if n == 0:
-              print("WARNING: no struct timeval pattern found; nothing to patch")
-              sys.exit(0)
-          open(path, "w").write(new)
-          PYEOF
-          grep -n -B2 -A6 "_SYS__TIMEVAL_H_\|_STRUCT_TIMEVAL_DEFINED" "$FILE" | head -40 || true
+          awk '
+            /^struct[[:space:]]+timeval[[:space:]]*\{/ {
+              print "#if !defined(_SYS__TIMEVAL_H_) && !defined(_TIMEVAL_DEFINED) && !defined(_STRUCT_TIMEVAL_DEFINED)"
+              intv = 1
+            }
+            intv && /^\}/ {
+              print $0
+              print "#define _STRUCT_TIMEVAL_DEFINED 1"
+              print "#endif"
+              intv = 0
+              next
+            }
+            { print }
+          ' "$FILE" > "$FILE.new"
+          mv "$FILE.new" "$FILE"
+          echo "--- patched region ---"
+          grep -n -B2 -A6 "STRUCT_TIMEVAL_DEFINED" "$FILE" | head -40 || true
 
       - name: Create usbhdfsd stub if missing
         run: |
           if [ ! -d src/ps2sdk/usbhdfsd ]; then
             mkdir -p src/ps2sdk/usbhdfsd
-            cat > src/ps2sdk/usbhdfsd/Makefile <<'EOF'
-          all:
-          	@echo "usbhdfsd: stub"
-          clean:
-          	@echo "usbhdfsd: stub clean"
-          install:
-          	@echo "usbhdfsd: stub install"
-          EOF
+            printf 'all:\n\t@echo "usbhdfsd: stub"\nclean:\n\t@echo "usbhdfsd: stub clean"\ninstall:\n\t@echo "usbhdfsd: stub install"\n' > src/ps2sdk/usbhdfsd/Makefile
           fi
           ls -la src/ps2sdk/usbhdfsd/
 
@@ -178,8 +167,6 @@ ps2sdk/libtime.h
         run: |
           set -euo pipefail
           make clean || true
-          # -j2 keeps parallel jobs gentle on the container.
-          # -k keeps going after individual file errors so we see all of them.
           make -k -j2 2>&1 | tee build.log
           echo "=== make finished, tail of build.log ==="
           tail -50 build.log
