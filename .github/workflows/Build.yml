@@ -6,18 +6,13 @@ on:
     branches: [ main, master ]
     paths:
       - 'src/**'
-      - 'standalone/**'
+      - 'include/**'
       - 'Makefile'
       - 'Makefile.ps2'
+      - 'Makefile.pref'
       - '.github/workflows/build.yml'
   pull_request:
     branches: [ main, master ]
-    paths:
-      - 'src/**'
-      - 'standalone/**'
-      - 'Makefile'
-      - 'Makefile.ps2'
-      - '.github/workflows/build.yml'
 
 env:
   BUILD_TYPE: Release
@@ -30,65 +25,83 @@ jobs:
       image: ps2dev/ps2dev:latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repository (with submodules)
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
 
       - name: Install build dependencies
         run: |
-          # Alpine-based image. Install only what is missing.
           apk update
           apk add --no-cache make git curl bash binutils python3 coreutils findutils
 
-      - name: Verify toolchain environment
+      - name: Create ee-* / iop-* toolchain symlinks
         run: |
-          echo "PS2DEV: $PS2DEV"
-          echo "PS2SDK: $PS2SDK"
-          echo "--- EE bin directory ---"
-          ls -la "$PS2DEV/ee/bin/" | head -20
-          echo "--- Host toolchain check ---"
-          # Do NOT use 'which gcc' - the container has NO native gcc, only the
-          # cross-compiler mips64r5900el-ps2-elf-gcc. Check that instead.
-          command -v make || { echo "make missing"; exit 1; }
-          command -v "$PS2DEV/ee/bin/mips64r5900el-ps2-elf-gcc" || { echo "cross gcc missing"; exit 1; }
-          echo "--- ps2sdk libraries ---"
-          ls "$PS2SDK/ee/lib/" | head -40 || true
-          echo "--- ps2sdk include ---"
-          ls "$PS2SDK/ee/include/" | head -20 || true
+          set -e
+          mkdir -p /usr/local/bin
 
-      - name: Show Makefile layout (diagnostic)
+          # EE toolchain: mips64r5900el-ps2-elf-*  ->  ee-*
+          if [ -d "$PS2DEV/ee/bin" ]; then
+            for f in "$PS2DEV"/ee/bin/mips64r5900el-ps2-elf-*; do
+              [ -e "$f" ] || continue
+              base=$(basename "$f")
+              name=${base#mips64r5900el-ps2-elf-}
+              ln -sf "$f" "/usr/local/bin/ee-$name"
+            done
+          fi
+
+          # IOP toolchain: try the same prefix, then fall back
+          if [ -d "$PS2DEV/iop/bin" ]; then
+            for f in "$PS2DEV"/iop/bin/mips64r5900el-ps2-elf-*; do
+              [ -e "$f" ] || continue
+              base=$(basename "$f")
+              name=${base#mips64r5900el-ps2-elf-}
+              ln -sf "$f" "/usr/local/bin/iop-$name"
+            done
+          fi
+
+          echo "--- created symlinks ---"
+          ls -la /usr/local/bin/ | grep -E ' (ee|iop)-' | head -40 || true
+
+          echo "--- sanity check ---"
+          ee-gcc --version | head -1
+          iop-gcc --version | head -1 || true
+
+      - name: Show repo layout (diagnostic)
         run: |
-          echo "--- Root Makefile ---"
-          cat Makefile
+          echo "--- top level ---"
+          ls -la
           echo ""
-          echo "--- Makefile.ps2 (head) ---"
-          head -60 Makefile.ps2 || true
+          echo "--- .gitmodules ---"
+          cat .gitmodules 2>/dev/null || echo "(no .gitmodules)"
+          echo ""
+          echo "--- src/ps2sdk ---"
+          ls -la src/ps2sdk/ || true
+          echo ""
+          echo "--- src/ps2sdk/usbhdfsd (submodule) ---"
+          ls -la src/ps2sdk/usbhdfsd/ 2>/dev/null | head || echo "(missing)"
+          echo ""
+          echo "--- ps2sdk ports ---"
+          ls "$PS2SDK/ports/lib/" 2>/dev/null | head -40 || echo "(no ports/lib)"
+          echo ""
+          echo "--- gsKit ---"
+          ls "$PS2DEV/gsKit/lib/" 2>/dev/null | head || echo "(no gsKit/lib)"
 
       - name: Build LuaPlayer
+        shell: bash
         run: |
-          # Clean any previous build artifacts
+          set -o pipefail
           make clean || true
-          # Build the main ELF. Use V=1 if the Makefile supports it for verbose output.
           make -j"$(nproc)" 2>&1 | tee build.log
-          # Fail the step if make failed (tee hides the exit code otherwise)
-          if [ "${PIPESTATUS[0]}" -ne 0 ]; then
-            echo "===================== BUILD FAILED ====================="
-            echo "Last 100 lines of build log:"
-            tail -n 100 build.log
-            exit 1
-          fi
 
       - name: Locate built ELF
         id: elf
+        shell: bash
         run: |
           ELF=""
-          for cand in \
-              luaplayer.elf \
-              luaplayer \
-              build/luaplayer.elf; do
-            if [ -f "$cand" ]; then
-              ELF="$cand"
-              break
-            fi
+          for cand in luaplayer.elf luaplayer build/luaplayer.elf; do
+            if [ -f "$cand" ]; then ELF="$cand"; break; fi
           done
           if [ -z "$ELF" ]; then
             echo "ERROR: could not find built ELF. Listing current directory:"
@@ -96,38 +109,39 @@ jobs:
             exit 1
           fi
           echo "Built ELF: $ELF"
-          echo "path=$ELF" >> $GITHUB_OUTPUT
+          echo "path=$ELF" >> "$GITHUB_OUTPUT"
 
       - name: Debug — inspect ELF
+        shell: bash
         run: |
           ELF="${{ steps.elf.outputs.path }}"
-          OBJDUMP=$PS2DEV/ee/bin/mips64r5900el-ps2-elf-objdump
-          NM=$PS2DEV/ee/bin/mips64r5900el-ps2-elf-nm
+          OBJDUMP="$PS2DEV/ee/bin/mips64r5900el-ps2-elf-objdump"
+          NM="$PS2DEV/ee/bin/mips64r5900el-ps2-elf-nm"
           echo "=== File info ==="
           ls -la "$ELF"
           echo ""
           echo "=== Section headers ==="
-          $OBJDUMP -h "$ELF" 2>&1 | head -60
+          "$OBJDUMP" -h "$ELF" 2>&1 | head -60
           echo ""
           echo "=== Symbol count ==="
-          $NM -S "$ELF" 2>&1 | wc -l
+          "$NM" -S "$ELF" 2>&1 | wc -l
           echo ""
-          echo "=== Key LuaPlayer symbols ==="
-          $NM -S "$ELF" 2>&1 | grep -iE "lua|luaplayer|graphics|controls|sound" | head -30 || true
+          echo "=== LuaPlayer symbols ==="
+          "$NM" -S "$ELF" 2>&1 | grep -iE "lua|luaplayer|graphics|controls|sound" | head -30 || true
 
       - name: Pack release ELF
+        shell: bash
         run: |
           SRC="${{ steps.elf.outputs.path }}"
           if command -v ps2-packer >/dev/null 2>&1; then
             ps2-packer "$SRC" LUAPLAYER.ELF
           elif [ -x "$PS2DEV/bin/ps2-packer-lite" ]; then
-            $PS2DEV/bin/ps2-packer-lite "$SRC" LUAPLAYER.ELF
+            "$PS2DEV/bin/ps2-packer-lite" "$SRC" LUAPLAYER.ELF
           else
             echo "ps2-packer not found, shipping uncompressed ELF"
             cp "$SRC" LUAPLAYER.ELF
           fi
           ls -la LUAPLAYER.ELF
-          echo "sha_name=$(echo ${GITHUB_SHA} | cut -c1-8)" >> $GITHUB_ENV
 
       - name: Upload build log
         if: always()
@@ -144,7 +158,8 @@ jobs:
           path: LUAPLAYER.ELF
           if-no-files-found: error
 
-      - name: Upload unpacked ELF (for debug)
+      - name: Upload unpacked ELF (debug)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: debug-luaplayer-elf_${{ github.sha }}
