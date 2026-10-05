@@ -28,7 +28,7 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          apk add --no-cache make bash binutils python3 coreutils findutils
+          apk add --no-cache make bash binutils python3 coreutils findutils curl
 
       - name: Create ee-* toolchain symlinks
         run: |
@@ -45,9 +45,6 @@ jobs:
           done
           ee-gcc --version | head -1
 
-      # ------------------------------------------------------------------
-      # Probe: now also detects the Lua version in ports
-      # ------------------------------------------------------------------
       - name: Probe container contents
         run: |
           echo "=== lua.h version ==="
@@ -58,10 +55,10 @@ jobs:
           echo ""
           echo "=== ft2build.h ==="
           find "$PS2SDK" -name ft2build.h 2>/dev/null || echo "(missing)"
+          echo ""
+          echo "=== other ports libs ==="
+          ls "$PS2SDK/ports/lib/" 2>/dev/null | head -40 || echo "(none)"
 
-      # ------------------------------------------------------------------
-      # FreeType (unchanged from previous version)
-      # ------------------------------------------------------------------
       - name: Build FreeType if missing
         run: |
           set -e
@@ -87,14 +84,10 @@ jobs:
           sed -i "s#-I\$(PS2SDK)/ports/include\b#-I\$(PS2SDK)/ports/include -I\$(PS2SDK)/$REL#g" Makefile.ps2 || true
           grep -n "ports/include" Makefile.ps2 || true
 
-      # ------------------------------------------------------------------
-      # NEW: Build Lua 5.1.5 and overwrite the incompatible 5.3/5.4 in ports
-      # ------------------------------------------------------------------
       - name: Build and install Lua 5.1.5 for PS2
         run: |
           set -e
 
-          # Detect whether the currently-installed Lua is already 5.1
           if grep -q '"Lua 5\.1' "$PS2SDK/ports/include/lua.h" 2>/dev/null; then
             echo "Lua 5.1 already installed."
             exit 0
@@ -111,8 +104,6 @@ jobs:
           EE_AR="$PS2DEV/ee/bin/mips64r5900el-ps2-elf-ar"
           EE_RANLIB="$PS2DEV/ee/bin/mips64r5900el-ps2-elf-ranlib"
 
-          # Build the two static libs (liblua.a + liblualib.a).
-          # Use the generic `a` target; provide PS2 flags via MYCFLAGS.
           make -C src clean || true
           make -C src \
               a \
@@ -127,10 +118,8 @@ jobs:
           echo "=== built libs ==="
           ls -la src/*.a
 
-          # Install over the incompatible version in $PS2SDK/ports
           mkdir -p "$PS2SDK/ports/lib" "$PS2SDK/ports/include"
 
-          # Remove any stale Lua artifacts first
           rm -f "$PS2SDK/ports/lib/"liblua*.a
           rm -f "$PS2SDK/ports/include/"{lua.h,luaconf.h,lualib.h,lauxlib.h}
 
@@ -143,9 +132,6 @@ jobs:
           grep -E 'LUA_VERSION|LUA_RELEASE' "$PS2SDK/ports/include/lua.h"
           ls -la "$PS2SDK/ports/lib/"liblua*.a
 
-      # ------------------------------------------------------------------
-      # usbhdfsd stub (unchanged)
-      # ------------------------------------------------------------------
       - name: Create usbhdfsd stub if missing
         run: |
           if [ ! -d src/ps2sdk/usbhdfsd ]; then
@@ -161,9 +147,6 @@ jobs:
           fi
           ls -la src/ps2sdk/usbhdfsd/
 
-      # ------------------------------------------------------------------
-      # Build
-      # ------------------------------------------------------------------
       - name: Build LuaPlayer
         shell: bash
         run: |
