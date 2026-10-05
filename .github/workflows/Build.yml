@@ -25,23 +25,42 @@ jobs:
       image: ps2dev/ps2dev:latest
 
     steps:
+      # ------------------------------------------------------------------
+      # 1. Install git BEFORE checkout so submodules are supported.
+      #    The Alpine image does not ship a modern git, so checkout@v4
+      #    would otherwise fall back to the REST API (no submodules).
+      # ------------------------------------------------------------------
+      - name: Pre-install git (required for submodule checkout)
+        run: |
+          apk update
+          apk add --no-cache git ca-certificates
+          git --version
+
+      # ------------------------------------------------------------------
+      # 2. Now checkout works via real git clone + submodules
+      # ------------------------------------------------------------------
       - name: Checkout repository (with submodules)
         uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0
 
+      # ------------------------------------------------------------------
+      # 3. Remaining build deps
+      # ------------------------------------------------------------------
       - name: Install build dependencies
         run: |
-          apk update
-          apk add --no-cache make git curl bash binutils python3 coreutils findutils
+          apk add --no-cache make bash binutils python3 coreutils findutils
 
+      # ------------------------------------------------------------------
+      # 4. Recreate the legacy ee-*/iop-* toolchain symlinks that the
+      #    old Makefile.pref expects but the modern image no longer ships.
+      # ------------------------------------------------------------------
       - name: Create ee-* / iop-* toolchain symlinks
         run: |
           set -e
           mkdir -p /usr/local/bin
 
-          # EE toolchain: mips64r5900el-ps2-elf-*  ->  ee-*
           if [ -d "$PS2DEV/ee/bin" ]; then
             for f in "$PS2DEV"/ee/bin/mips64r5900el-ps2-elf-*; do
               [ -e "$f" ] || continue
@@ -51,7 +70,6 @@ jobs:
             done
           fi
 
-          # IOP toolchain: try the same prefix, then fall back
           if [ -d "$PS2DEV/iop/bin" ]; then
             for f in "$PS2DEV"/iop/bin/mips64r5900el-ps2-elf-*; do
               [ -e "$f" ] || continue
@@ -61,14 +79,16 @@ jobs:
             done
           fi
 
-          echo "--- created symlinks ---"
+          echo "--- symlinks ---"
           ls -la /usr/local/bin/ | grep -E ' (ee|iop)-' | head -40 || true
-
-          echo "--- sanity check ---"
+          echo "--- sanity ---"
           ee-gcc --version | head -1
           iop-gcc --version | head -1 || true
 
-      - name: Show repo layout (diagnostic)
+      # ------------------------------------------------------------------
+      # 5. Diagnostic: confirm submodules landed
+      # ------------------------------------------------------------------
+      - name: Show repo layout
         run: |
           echo "--- top level ---"
           ls -la
@@ -81,13 +101,10 @@ jobs:
           echo ""
           echo "--- src/ps2sdk/usbhdfsd (submodule) ---"
           ls -la src/ps2sdk/usbhdfsd/ 2>/dev/null | head || echo "(missing)"
-          echo ""
-          echo "--- ps2sdk ports ---"
-          ls "$PS2SDK/ports/lib/" 2>/dev/null | head -40 || echo "(no ports/lib)"
-          echo ""
-          echo "--- gsKit ---"
-          ls "$PS2DEV/gsKit/lib/" 2>/dev/null | head || echo "(no gsKit/lib)"
 
+      # ------------------------------------------------------------------
+      # 6. Build
+      # ------------------------------------------------------------------
       - name: Build LuaPlayer
         shell: bash
         run: |
@@ -97,6 +114,7 @@ jobs:
 
       - name: Locate built ELF
         id: elf
+        if: always()
         shell: bash
         run: |
           ELF=""
@@ -104,32 +122,26 @@ jobs:
             if [ -f "$cand" ]; then ELF="$cand"; break; fi
           done
           if [ -z "$ELF" ]; then
-            echo "ERROR: could not find built ELF. Listing current directory:"
-            ls -la
-            exit 1
+            echo "No ELF built (build likely failed earlier)."
+            echo "path=" >> "$GITHUB_OUTPUT"
+          else
+            echo "Built ELF: $ELF"
+            echo "path=$ELF" >> "$GITHUB_OUTPUT"
           fi
-          echo "Built ELF: $ELF"
-          echo "path=$ELF" >> "$GITHUB_OUTPUT"
 
       - name: Debug — inspect ELF
+        if: steps.elf.outputs.path != ''
         shell: bash
         run: |
           ELF="${{ steps.elf.outputs.path }}"
           OBJDUMP="$PS2DEV/ee/bin/mips64r5900el-ps2-elf-objdump"
           NM="$PS2DEV/ee/bin/mips64r5900el-ps2-elf-nm"
-          echo "=== File info ==="
-          ls -la "$ELF"
-          echo ""
-          echo "=== Section headers ==="
-          "$OBJDUMP" -h "$ELF" 2>&1 | head -60
-          echo ""
-          echo "=== Symbol count ==="
-          "$NM" -S "$ELF" 2>&1 | wc -l
-          echo ""
-          echo "=== LuaPlayer symbols ==="
-          "$NM" -S "$ELF" 2>&1 | grep -iE "lua|luaplayer|graphics|controls|sound" | head -30 || true
+          echo "=== File info ===";  ls -la "$ELF"
+          echo ""; echo "=== Sections ==="; "$OBJDUMP" -h "$ELF" | head -60
+          echo ""; echo "=== Symbols ===";  "$NM" -S "$ELF" | wc -l
 
       - name: Pack release ELF
+        if: steps.elf.outputs.path != ''
         shell: bash
         run: |
           SRC="${{ steps.elf.outputs.path }}"
@@ -138,11 +150,13 @@ jobs:
           elif [ -x "$PS2DEV/bin/ps2-packer-lite" ]; then
             "$PS2DEV/bin/ps2-packer-lite" "$SRC" LUAPLAYER.ELF
           else
-            echo "ps2-packer not found, shipping uncompressed ELF"
             cp "$SRC" LUAPLAYER.ELF
           fi
           ls -la LUAPLAYER.ELF
 
+      # ------------------------------------------------------------------
+      # 7. Artifacts — always upload the log, conditionally the ELF
+      # ------------------------------------------------------------------
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
@@ -152,6 +166,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload LUAPLAYER.ELF
+        if: steps.elf.outputs.path != ''
         uses: actions/upload-artifact@v4
         with:
           name: LuaPlayer-PS2_${{ github.sha }}
@@ -159,7 +174,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload unpacked ELF (debug)
-        if: always()
+        if: steps.elf.outputs.path != ''
         uses: actions/upload-artifact@v4
         with:
           name: debug-luaplayer-elf_${{ github.sha }}
