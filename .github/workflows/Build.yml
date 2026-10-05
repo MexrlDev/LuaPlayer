@@ -58,6 +58,12 @@ jobs:
           echo ""
           echo "=== other ports libs ==="
           ls "$PS2SDK/ports/lib/" 2>/dev/null | head -40 || echo "(none)"
+          echo ""
+          echo "=== disk space ==="
+          df -h / /tmp 2>/dev/null || true
+          echo ""
+          echo "=== memory ==="
+          free -m 2>/dev/null || cat /proc/meminfo | head -5 || true
 
       - name: Build FreeType if missing
         run: |
@@ -162,14 +168,49 @@ jobs:
           fi
           ls -la src/ps2sdk/usbhdfsd/
 
+      # ------------------------------------------------------------------
+      # NEW DIAGNOSTIC: print the Makefiles and a dry-run plan
+      # ------------------------------------------------------------------
+      - name: Diagnose Makefile structure
+        run: |
+          echo "===== Makefile ====="
+          cat Makefile
+          echo ""
+          echo "===== Makefile.pref ====="
+          cat Makefile.pref
+          echo ""
+          echo "===== Makefile.eeglobal ====="
+          cat Makefile.eeglobal
+          echo ""
+          echo "===== Makefile.ps2 ====="
+          cat Makefile.ps2
+          echo ""
+          echo "===== make -n (dry run, first 120 lines) ====="
+          make clean >/dev/null 2>&1 || true
+          make -n 2>&1 | head -120 || true
+          echo "===== end dry run ====="
+
+      # ------------------------------------------------------------------
+      # Build serially, capture exit code explicitly
+      # ------------------------------------------------------------------
       - name: Build LuaPlayer
         shell: bash
         run: |
-          set -euo pipefail
-          make clean || true
-          make -k -j2 2>&1 | tee build.log
-          echo "=== make finished, tail of build.log ==="
-          tail -50 build.log
+          make clean >/dev/null 2>&1 || true
+          set +e
+          make -j1 > build.log 2>&1
+          MAKE_EXIT=$?
+          set -e
+          echo "==============================================================="
+          echo "make exit code: $MAKE_EXIT"
+          echo "=================== build.log (last 250 lines) ================"
+          tail -250 build.log || true
+          echo "==============================================================="
+          echo "=== files produced in src/ ==="
+          ls -la src/*.o 2>/dev/null | head -40 || echo "(no .o files)"
+          echo "=== ELF check ==="
+          ls -la luaplayer.elf 2>/dev/null || echo "(no luaplayer.elf)"
+          # Do not exit nonzero here; the next step verifies the ELF
 
       - name: Locate built ELF
         id: elf
@@ -182,8 +223,8 @@ jobs:
           if [ -z "$ELF" ]; then
             echo "==============================================================="
             echo "ERROR: no ELF produced by the build."
-            echo "=================== last 120 lines of build.log ==============="
-            tail -120 build.log || true
+            echo "=================== last 250 lines of build.log ==============="
+            tail -250 build.log || true
             echo "==============================================================="
             exit 1
           fi
