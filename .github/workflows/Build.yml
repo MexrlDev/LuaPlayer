@@ -35,23 +35,47 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          # The ps2dev/ps2dev image is Alpine-based. Install any missing tools.
+          # Alpine-based image. Install only what is missing.
           apk update
-          apk add --no-cache make git curl bash binutils python3
+          apk add --no-cache make git curl bash binutils python3 coreutils findutils
 
       - name: Verify toolchain environment
         run: |
           echo "PS2DEV: $PS2DEV"
           echo "PS2SDK: $PS2SDK"
-          ls -la $PS2DEV/ee/bin/ | head -20
-          which make gcc
+          echo "--- EE bin directory ---"
+          ls -la "$PS2DEV/ee/bin/" | head -20
+          echo "--- Host toolchain check ---"
+          # Do NOT use 'which gcc' - the container has NO native gcc, only the
+          # cross-compiler mips64r5900el-ps2-elf-gcc. Check that instead.
+          command -v make || { echo "make missing"; exit 1; }
+          command -v "$PS2DEV/ee/bin/mips64r5900el-ps2-elf-gcc" || { echo "cross gcc missing"; exit 1; }
+          echo "--- ps2sdk libraries ---"
+          ls "$PS2SDK/ee/lib/" | head -40 || true
+          echo "--- ps2sdk include ---"
+          ls "$PS2SDK/ee/include/" | head -20 || true
+
+      - name: Show Makefile layout (diagnostic)
+        run: |
+          echo "--- Root Makefile ---"
+          cat Makefile
+          echo ""
+          echo "--- Makefile.ps2 (head) ---"
+          head -60 Makefile.ps2 || true
 
       - name: Build LuaPlayer
         run: |
           # Clean any previous build artifacts
           make clean || true
-          # Build the main ELF (this triggers the full build chain)
-          make -j$(nproc)
+          # Build the main ELF. Use V=1 if the Makefile supports it for verbose output.
+          make -j"$(nproc)" 2>&1 | tee build.log
+          # Fail the step if make failed (tee hides the exit code otherwise)
+          if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+            echo "===================== BUILD FAILED ====================="
+            echo "Last 100 lines of build log:"
+            tail -n 100 build.log
+            exit 1
+          fi
 
       - name: Locate built ELF
         id: elf
@@ -89,7 +113,7 @@ jobs:
           $NM -S "$ELF" 2>&1 | wc -l
           echo ""
           echo "=== Key LuaPlayer symbols ==="
-          $NM -S "$ELF" 2>&1 | grep -iE "lua|luaplayer|graphics|controls|sound" || true
+          $NM -S "$ELF" 2>&1 | grep -iE "lua|luaplayer|graphics|controls|sound" | head -30 || true
 
       - name: Pack release ELF
         run: |
@@ -105,16 +129,24 @@ jobs:
           ls -la LUAPLAYER.ELF
           echo "sha_name=$(echo ${GITHUB_SHA} | cut -c1-8)" >> $GITHUB_ENV
 
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log_${{ github.sha }}
+          path: build.log
+          if-no-files-found: warn
+
       - name: Upload LUAPLAYER.ELF
         uses: actions/upload-artifact@v4
         with:
-          name: LuaPlayer-PS2_${{ env.sha_name }}
+          name: LuaPlayer-PS2_${{ github.sha }}
           path: LUAPLAYER.ELF
           if-no-files-found: error
 
       - name: Upload unpacked ELF (for debug)
         uses: actions/upload-artifact@v4
         with:
-          name: debug-luaplayer-elf_${{ env.sha_name }}
+          name: debug-luaplayer-elf_${{ github.sha }}
           path: ${{ steps.elf.outputs.path }}
           if-no-files-found: warn
