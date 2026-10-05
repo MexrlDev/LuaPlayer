@@ -124,10 +124,10 @@ jobs:
           rm -f "$PS2SDK/ports/include/"{lua.h,luaconf.h,lualib.h,lauxlib.h}
 
           cp -v src/liblua.a "$PS2SDK/ports/lib/"
-          # Lua 5.1 puts everything in liblua.a; LuaPlayer still passes
-          # -llualib (a Lua 5.0 leftover). Provide it as a copy of liblua.a.
-          # The linker pulls symbols from liblua.a first, so the duplicate
-          # archive is never actually consulted for unresolved symbols.
+          # Lua 5.1 ships a single archive. LuaPlayer still passes -llualib
+          # (a Lua 5.0 leftover); provide a copy so the flag resolves. The
+          # linker pulls everything from liblua.a first, so this duplicate is
+          # never consulted for unresolved symbols.
           cp -v src/liblua.a "$PS2SDK/ports/lib/liblualib.a"
 
           cp -v src/lua.h src/luaconf.h src/lualib.h src/lauxlib.h \
@@ -136,6 +136,39 @@ jobs:
           echo "=== verify installation ==="
           grep -E 'LUA_VERSION|LUA_RELEASE' "$PS2SDK/ports/include/lua.h"
           ls -la "$PS2SDK/ports/lib/"liblua*.a
+
+      - name: Patch libtime.h to avoid struct timeval redefinition
+        run: |
+          set -e
+          FILE=src/ps2sdk/libtime.h
+          cp "$FILE" "$FILE.orig"
+          python3 - <<'PYEOF'
+          import re, sys
+
+          path = "src/ps2sdk/libtime.h"
+          src = open(path).read()
+
+          # Modern ps2sdk provides struct timeval via <sys/_timeval.h>.
+          # Wrap LuaPlayer's duplicate definition in a guard.
+          pattern = r'struct\s+timeval\s*\{[^}]*\}\s*;'
+          def repl(m):
+              return (
+                  '#if !defined(_SYS__TIMEVAL_H_) && !defined(_TIMEVAL_DEFINED) '
+                  '&& !defined(_STRUCT_TIMEVAL_DEFINED)\n'
+                  + m.group(0) + '\n'
+                  + '#define _STRUCT_TIMEVAL_DEFINED 1\n'
+                  + '#endif'
+              )
+          new, n = re.subn(pattern, repl, src, count=1, flags=re.DOTALL)
+          if n == 0:
+              print("WARNING: no struct timeval pattern found; nothing to patch")
+              sys.exit(0)
+
+          open(path, "w").write(new)
+          print(f"Patched {path} ({n} replacement)")
+          PYEOF
+          echo "--- context around guard ---"
+          grep -n -B2 -A6 "_SYS__TIMEVAL_H_\|_STRUCT_TIMEVAL_DEFINED" "$FILE" | head -40 || true
 
       - name: Create usbhdfsd stub if missing
         run: |
