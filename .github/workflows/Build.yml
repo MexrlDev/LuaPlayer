@@ -15,7 +15,6 @@ jobs:
       image: ps2dev/ps2dev:latest
 
     steps:
-      # 1. Install git BEFORE checkout so submodules work
       - name: Pre-install git
         run: |
           apk update
@@ -31,7 +30,6 @@ jobs:
         run: |
           apk add --no-cache make bash binutils python3 coreutils findutils
 
-      # 2. Create ee-* toolchain symlinks (Makefile.pref expects these)
       - name: Create ee-* toolchain symlinks
         run: |
           set -e
@@ -45,84 +43,116 @@ jobs:
               ln -sf "$f" "/usr/local/bin/${dir}-$name"
             done
           done
-          echo "--- sanity ---"
           ee-gcc --version | head -1
 
-      # 3. Probe what's actually in the container
+      # ------------------------------------------------------------------
+      # Probe: now also detects the Lua version in ports
+      # ------------------------------------------------------------------
       - name: Probe container contents
         run: |
-          echo "=== ports/include ==="
-          ls "$PS2SDK/ports/include/" 2>/dev/null | head -40 || echo "(missing)"
+          echo "=== lua.h version ==="
+          grep -E 'LUA_VERSION|LUA_RELEASE' "$PS2SDK/ports/include/lua.h" 2>/dev/null || echo "(no lua.h)"
           echo ""
-          echo "=== ft2build.h anywhere? ==="
-          find "$PS2SDK" -name ft2build.h 2>/dev/null || echo "(none)"
+          echo "=== existing liblua* in ports/lib ==="
+          ls -la "$PS2SDK/ports/lib/"liblua* 2>/dev/null || echo "(none)"
           echo ""
-          echo "=== gsKit ==="
-          ls "$PS2DEV/gsKit/lib" 2>/dev/null || ls "$GSKIT/lib" 2>/dev/null || echo "(none)"
-          echo ""
-          echo "=== liblua ==="
-          find "$PS2SDK" -name 'liblua*' 2>/dev/null || echo "(none)"
-          echo ""
-          echo "=== libmikmod ==="
-          find "$PS2SDK" -name 'libmikmod*' 2>/dev/null || echo "(none)"
+          echo "=== ft2build.h ==="
+          find "$PS2SDK" -name ft2build.h 2>/dev/null || echo "(missing)"
 
-      # 4. Build FreeType (and friends) from ps2sdk-ports if missing
-      - name: Build missing ps2sdk ports
+      # ------------------------------------------------------------------
+      # FreeType (unchanged from previous version)
+      # ------------------------------------------------------------------
+      - name: Build FreeType if missing
         run: |
           set -e
           if find "$PS2SDK" -name ft2build.h 2>/dev/null | grep -q .; then
-            echo "FreeType already present, skipping."
+            echo "FreeType already present."
           else
-            echo "FreeType missing, building from ps2sdk-ports..."
             cd /tmp
             git clone --depth 1 https://github.com/ps2dev/ps2sdk-ports.git
             cd ps2sdk-ports
-
             for port in zlib freetype; do
-              if [ -d "$port" ]; then
-                echo "==== building $port ===="
-                ( cd "$port" && make -j"$(nproc)" && make install ) \
-                  || echo "!!! $port build failed (continuing)"
-              fi
+              [ -d "$port" ] && ( cd "$port" && make -j"$(nproc)" && make install ) || true
             done
-
-            echo "=== after build ==="
-            find "$PS2SDK" -name ft2build.h 2>/dev/null || echo "(still no ft2build.h)"
           fi
 
-      # 5. Patch Makefile.ps2 to add the freetype2 include path.
-      #    FreeType installs headers under ports/include/freetype2/, but
-      #    LuaPlayer's Makefile only passes ports/include.
       - name: Patch Makefile.ps2 with freetype2 include
         run: |
           set -e
           FT_DIR=$(find "$PS2SDK" -name ft2build.h 2>/dev/null | head -1)
-          echo "ft2build.h -> $FT_DIR"
-          if [ -z "$FT_DIR" ]; then
-            echo "WARNING: no ft2build.h found; build will likely fail."
-            exit 0
-          fi
+          [ -z "$FT_DIR" ] && { echo "no ft2build.h"; exit 0; }
           FT_INC_DIR=$(dirname "$FT_DIR")
           REL=${FT_INC_DIR#"$PS2SDK"/}
-          echo "Adding include: \$(PS2SDK)/$REL"
-
-          # Back up and patch every occurrence of ports/include
           cp Makefile.ps2 Makefile.ps2.orig
-          # Insert the extra -I after ports/include (not after ports/include/zlib)
           sed -i "s#-I\$(PS2SDK)/ports/include\b#-I\$(PS2SDK)/ports/include -I\$(PS2SDK)/$REL#g" Makefile.ps2 || true
-
-          echo "--- patched include lines ---"
           grep -n "ports/include" Makefile.ps2 || true
 
-      # 6. Stub the missing usbhdfsd directory so `make clean` doesn't fail
+      # ------------------------------------------------------------------
+      # NEW: Build Lua 5.1.5 and overwrite the incompatible 5.3/5.4 in ports
+      # ------------------------------------------------------------------
+      - name: Build and install Lua 5.1.5 for PS2
+        run: |
+          set -e
+
+          # Detect whether the currently-installed Lua is already 5.1
+          if grep -q '"Lua 5\.1' "$PS2SDK/ports/include/lua.h" 2>/dev/null; then
+            echo "Lua 5.1 already installed."
+            exit 0
+          fi
+
+          echo "Container ships an incompatible Lua. Building 5.1.5..."
+
+          cd /tmp
+          curl -fsSL -o lua-5.1.5.tar.gz https://www.lua.org/ftp/lua-5.1.5.tar.gz
+          tar xzf lua-5.1.5.tar.gz
+          cd lua-5.1.5
+
+          EE_GCC="$PS2DEV/ee/bin/mips64r5900el-ps2-elf-gcc"
+          EE_AR="$PS2DEV/ee/bin/mips64r5900el-ps2-elf-ar"
+          EE_RANLIB="$PS2DEV/ee/bin/mips64r5900el-ps2-elf-ranlib"
+
+          # Build the two static libs (liblua.a + liblualib.a).
+          # Use the generic `a` target; provide PS2 flags via MYCFLAGS.
+          make -C src clean || true
+          make -C src \
+              a \
+              CC="$EE_GCC" \
+              AR="$EE_AR rcu" \
+              RANLIB="$EE_RANLIB" \
+              MYCFLAGS="-D_EE -O2 -G0 -Wall -I$PS2SDK/ee/include -I$PS2SDK/common/include" \
+              MYLDFLAGS="-L$PS2SDK/ee/lib -L$PS2SDK/common/lib" \
+              MYLIBS="-lm" \
+              -j"$(nproc)"
+
+          echo "=== built libs ==="
+          ls -la src/*.a
+
+          # Install over the incompatible version in $PS2SDK/ports
+          mkdir -p "$PS2SDK/ports/lib" "$PS2SDK/ports/include"
+
+          # Remove any stale Lua artifacts first
+          rm -f "$PS2SDK/ports/lib/"liblua*.a
+          rm -f "$PS2SDK/ports/include/"{lua.h,luaconf.h,lualib.h,lauxlib.h}
+
+          cp -v src/liblua.a    "$PS2SDK/ports/lib/"
+          cp -v src/liblualib.a "$PS2SDK/ports/lib/"
+          cp -v src/lua.h src/luaconf.h src/lualib.h src/lauxlib.h \
+                "$PS2SDK/ports/include/"
+
+          echo "=== verify installation ==="
+          grep -E 'LUA_VERSION|LUA_RELEASE' "$PS2SDK/ports/include/lua.h"
+          ls -la "$PS2SDK/ports/lib/"liblua*.a
+
+      # ------------------------------------------------------------------
+      # usbhdfsd stub (unchanged)
+      # ------------------------------------------------------------------
       - name: Create usbhdfsd stub if missing
         run: |
           if [ ! -d src/ps2sdk/usbhdfsd ]; then
-            echo "Creating stub for src/ps2sdk/usbhdfsd..."
             mkdir -p src/ps2sdk/usbhdfsd
             cat > src/ps2sdk/usbhdfsd/Makefile <<'EOF'
           all:
-          	@echo "usbhdfsd: stub (nothing to build)"
+          	@echo "usbhdfsd: stub"
           clean:
           	@echo "usbhdfsd: stub clean"
           install:
@@ -131,7 +161,9 @@ jobs:
           fi
           ls -la src/ps2sdk/usbhdfsd/
 
-      # 7. Build
+      # ------------------------------------------------------------------
+      # Build
+      # ------------------------------------------------------------------
       - name: Build LuaPlayer
         shell: bash
         run: |
@@ -179,3 +211,11 @@ jobs:
           name: LuaPlayer-PS2_${{ github.sha }}
           path: LUAPLAYER.ELF
           if-no-files-found: error
+
+      - name: Upload unpacked ELF (debug)
+        if: steps.elf.outputs.path != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-luaplayer-elf_${{ github.sha }}
+          path: ${{ steps.elf.outputs.path }}
+          if-no-files-found: warn
