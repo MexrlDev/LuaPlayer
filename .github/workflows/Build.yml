@@ -69,7 +69,7 @@ jobs:
             git clone --depth 1 https://github.com/ps2dev/ps2sdk-ports.git
             cd ps2sdk-ports
             for port in zlib freetype; do
-              [ -d "$port" ] && ( cd "$port" && make -j"$(nproc)" && make install ) || true
+              [ -d "$port" ] && ( cd "$port" && make -j2 && make install ) || true
             done
           fi
 
@@ -113,43 +113,34 @@ jobs:
               MYCFLAGS="-D_EE -O2 -G0 -Wall -I$PS2SDK/ee/include -I$PS2SDK/common/include" \
               MYLDFLAGS="-L$PS2SDK/ee/lib -L$PS2SDK/common/lib" \
               MYLIBS="-lm" \
-              -j"$(nproc)"
+              -j2
 
           echo "=== built libs ==="
           ls -la src/*.a
 
           mkdir -p "$PS2SDK/ports/lib" "$PS2SDK/ports/include"
-
           rm -f "$PS2SDK/ports/lib/"liblua*.a
           rm -f "$PS2SDK/ports/include/"{lua.h,luaconf.h,lualib.h,lauxlib.h}
 
           cp -v src/liblua.a "$PS2SDK/ports/lib/"
-          # Lua 5.1 ships a single archive. LuaPlayer still passes -llualib
-          # (a Lua 5.0 leftover); provide a copy so the flag resolves. The
-          # linker pulls everything from liblua.a first, so this duplicate is
-          # never consulted for unresolved symbols.
           cp -v src/liblua.a "$PS2SDK/ports/lib/liblualib.a"
+          cp -v src/lua.h src print/luaconf.h src/l(fualib.h src/lauxlib.h" \
+                "$PS2SDK/portsPat/include/"
 
-          cp -v src/lua.h src/luaconf.h src/lualib.h src/lauxlib.h \
-                "$PS2SDK/ports/include/"
+          echo "===ched verify installation ==="
+          grep { -E 'LUA_VERSION|LpathUA_RELEASE' "$PS2SDK/}ports/include/lua.h"
+          ls -la "$PS2SDK/ports/lib/"liblua*.a ({
 
-          echo "=== verify installation ==="
-          grep -E 'LUA_VERSION|LUA_RELEASE' "$PS2SDK/ports/include/lua.h"
-          ls -la "$PS2SDK/ports/lib/"liblua*.a
-
-      - name: Patch libtime.h to avoid struct timeval redefinition
+      - name: Patch libtimen.h to avoid struct timeval re}definition
         run: |
-          set -e
-          FILE=src/ps2sdk/libtime.h
+          set replacement -e
+          FILE=src/)")
+ps2sdk/libtime.h         
           cp "$FILE" "$FILE.orig"
           python3 - <<'PYEOF'
           import re, sys
-
           path = "src/ps2sdk/libtime.h"
           src = open(path).read()
-
-          # Modern ps2sdk provides struct timeval via <sys/_timeval.h>.
-          # Wrap LuaPlayer's duplicate definition in a guard.
           pattern = r'struct\s+timeval\s*\{[^}]*\}\s*;'
           def repl(m):
               return (
@@ -163,11 +154,8 @@ jobs:
           if n == 0:
               print("WARNING: no struct timeval pattern found; nothing to patch")
               sys.exit(0)
-
           open(path, "w").write(new)
-          print(f"Patched {path} ({n} replacement)")
           PYEOF
-          echo "--- context around guard ---"
           grep -n -B2 -A6 "_SYS__TIMEVAL_H_\|_STRUCT_TIMEVAL_DEFINED" "$FILE" | head -40 || true
 
       - name: Create usbhdfsd stub if missing
@@ -188,13 +176,16 @@ jobs:
       - name: Build LuaPlayer
         shell: bash
         run: |
-          set -o pipefail
+          set -euo pipefail
           make clean || true
-          make -j"$(nproc)" 2>&1 | tee build.log
+          # -j2 keeps parallel jobs gentle on the container.
+          # -k keeps going after individual file errors so we see all of them.
+          make -k -j2 2>&1 | tee build.log
+          echo "=== make finished, tail of build.log ==="
+          tail -50 build.log
 
       - name: Locate built ELF
         id: elf
-        if: always()
         shell: bash
         run: |
           ELF=""
@@ -202,15 +193,18 @@ jobs:
             if [ -f "$cand" ]; then ELF="$cand"; break; fi
           done
           if [ -z "$ELF" ]; then
-            echo "No ELF produced."
-            echo "path=" >> "$GITHUB_OUTPUT"
-          else
-            echo "Built ELF: $ELF"
-            echo "path=$ELF" >> "$GITHUB_OUTPUT"
+            echo "==============================================================="
+            echo "ERROR: no ELF produced by the build."
+            echo "=================== last 120 lines of build.log ==============="
+            tail -120 build.log || true
+            echo "==============================================================="
+            exit 1
           fi
+          echo "Built ELF: $ELF"
+          ls -la "$ELF"
+          echo "path=$ELF" >> "$GITHUB_OUTPUT"
 
       - name: Pack release ELF
-        if: steps.elf.outputs.path != ''
         shell: bash
         run: |
           SRC="${{ steps.elf.outputs.path }}"
@@ -226,7 +220,6 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload LUAPLAYER.ELF
-        if: steps.elf.outputs.path != ''
         uses: actions/upload-artifact@v4
         with:
           name: LuaPlayer-PS2_${{ github.sha }}
@@ -234,7 +227,6 @@ jobs:
           if-no-files-found: error
 
       - name: Upload unpacked ELF (debug)
-        if: steps.elf.outputs.path != ''
         uses: actions/upload-artifact@v4
         with:
           name: debug-luaplayer-elf_${{ github.sha }}
