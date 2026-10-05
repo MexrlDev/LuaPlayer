@@ -1,0 +1,120 @@
+name: Build LuaPlayer - PS2
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'src/**'
+      - 'standalone/**'
+      - 'Makefile'
+      - 'Makefile.ps2'
+      - '.github/workflows/build.yml'
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'src/**'
+      - 'standalone/**'
+      - 'Makefile'
+      - 'Makefile.ps2'
+      - '.github/workflows/build.yml'
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  build:
+    name: Build (PS2)
+    runs-on: ubuntu-latest
+    container:
+      image: ps2dev/ps2dev:latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          # The ps2dev/ps2dev image is Alpine-based. Install any missing tools.
+          apk update
+          apk add --no-cache make git curl bash binutils python3
+
+      - name: Verify toolchain environment
+        run: |
+          echo "PS2DEV: $PS2DEV"
+          echo "PS2SDK: $PS2SDK"
+          ls -la $PS2DEV/ee/bin/ | head -20
+          which make gcc
+
+      - name: Build LuaPlayer
+        run: |
+          # Clean any previous build artifacts
+          make clean || true
+          # Build the main ELF (this triggers the full build chain)
+          make -j$(nproc)
+
+      - name: Locate built ELF
+        id: elf
+        run: |
+          ELF=""
+          for cand in \
+              luaplayer.elf \
+              luaplayer \
+              build/luaplayer.elf; do
+            if [ -f "$cand" ]; then
+              ELF="$cand"
+              break
+            fi
+          done
+          if [ -z "$ELF" ]; then
+            echo "ERROR: could not find built ELF. Listing current directory:"
+            ls -la
+            exit 1
+          fi
+          echo "Built ELF: $ELF"
+          echo "path=$ELF" >> $GITHUB_OUTPUT
+
+      - name: Debug — inspect ELF
+        run: |
+          ELF="${{ steps.elf.outputs.path }}"
+          OBJDUMP=$PS2DEV/ee/bin/mips64r5900el-ps2-elf-objdump
+          NM=$PS2DEV/ee/bin/mips64r5900el-ps2-elf-nm
+          echo "=== File info ==="
+          ls -la "$ELF"
+          echo ""
+          echo "=== Section headers ==="
+          $OBJDUMP -h "$ELF" 2>&1 | head -60
+          echo ""
+          echo "=== Symbol count ==="
+          $NM -S "$ELF" 2>&1 | wc -l
+          echo ""
+          echo "=== Key LuaPlayer symbols ==="
+          $NM -S "$ELF" 2>&1 | grep -iE "lua|luaplayer|graphics|controls|sound" || true
+
+      - name: Pack release ELF
+        run: |
+          SRC="${{ steps.elf.outputs.path }}"
+          if command -v ps2-packer >/dev/null 2>&1; then
+            ps2-packer "$SRC" LUAPLAYER.ELF
+          elif [ -x "$PS2DEV/bin/ps2-packer-lite" ]; then
+            $PS2DEV/bin/ps2-packer-lite "$SRC" LUAPLAYER.ELF
+          else
+            echo "ps2-packer not found, shipping uncompressed ELF"
+            cp "$SRC" LUAPLAYER.ELF
+          fi
+          ls -la LUAPLAYER.ELF
+          echo "sha_name=$(echo ${GITHUB_SHA} | cut -c1-8)" >> $GITHUB_ENV
+
+      - name: Upload LUAPLAYER.ELF
+        uses: actions/upload-artifact@v4
+        with:
+          name: LuaPlayer-PS2_${{ env.sha_name }}
+          path: LUAPLAYER.ELF
+          if-no-files-found: error
+
+      - name: Upload unpacked ELF (for debug)
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-luaplayer-elf_${{ env.sha_name }}
+          path: ${{ steps.elf.outputs.path }}
+          if-no-files-found: warn
